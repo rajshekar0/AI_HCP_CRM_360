@@ -13,24 +13,23 @@ PHONE_KEYWORD_RE = re.compile(
     r"\b(phone|mobile|number|contact|call|telephone|cell)\b",
     re.IGNORECASE,
 )
+FIELD_MARKER_RE = re.compile(
+    r"\b(email|emails|e mail|mail|mails|email id|mail id|phone|mobile|number|contact|call|telephone|cell)\b",
+    re.IGNORECASE,
+)
 
 FILLER_WORDS = {
     "can", "you", "could", "please", "kindly",
     "create", "make", "add", "register", "save", "store",
     "new", "lead", "contact", "crm", "customer", "prospect",
-    "doctor", "dr", "hcp", "physician",
-    "for", "with", "email", "mail", "e",
+    "doctor", "hcp", "physician",
+    "for", "with", "email", "emails", "mail", "mails", "e",
     "phone", "number", "mobile", "called", "named", "name",
     "a", "an", "the", "me",
     "as", "and", "at", "dot", "gmail", "yahoo",
     "outlook", "hotmail", "icloud", "com", "in",
     "start", "stop", "full", "rate", "symbol", "sign",
     "his", "her", "their", "is", "this", "that", "to", "of",
-
-    # Extra natural-language instruction words.
-    # These prevent phrases like:
-    # "the name should be in capital letters name: SHRESHTA"
-    # from becoming part of the stored lead name.
     "should", "be", "capital", "capitol", "letters", "letter",
     "uppercase", "upper", "case", "lowercase", "lower",
 }
@@ -82,6 +81,22 @@ def normalize_voice_text(text: str) -> str:
     return " ".join(normalized.split())
 
 
+def remove_instruction_phrases(text: str) -> str:
+    text = re.sub(
+        r"\b(the\s+)?name\s+should\s+be\s+(in\s+)?(capital|capitol|uppercase|upper\s+case|lowercase|lower\s+case)(\s+letters?)?\b",
+        " ",
+        text,
+        flags=re.IGNORECASE,
+    )
+    text = re.sub(
+        r"\b(in\s+)?(capital|capitol|uppercase|upper\s+case|lowercase|lower\s+case)(\s+letters?)?\b",
+        " ",
+        text,
+        flags=re.IGNORECASE,
+    )
+    return " ".join(text.split())
+
+
 def remove_duplicate_words(words):
     result = []
     seen = set()
@@ -99,6 +114,7 @@ def remove_duplicate_words(words):
 
 
 def clean_name_words(text: str, preserve_case: bool = False) -> str:
+    text = remove_instruction_phrases(text)
     text = re.sub(r"[^a-zA-Z\s.]", " ", text)
 
     words = []
@@ -127,40 +143,27 @@ def clean_name_words(text: str, preserve_case: bool = False) -> str:
 
 
 def extract_explicit_name(text: str) -> str:
-    """
-    Extracts only the value after explicit name markers.
-
-    Handles:
-    NAME: SHRESHTA EMAIL SHRESHTA@GMAIL.COM PHONE 9901070679
-    name - Divya Sharma email divya@gmail.com
-    name is Ravi Kumar phone 9876543210
-    """
     normalized = normalize_voice_text(text)
+    terminator = r"(?=\s+(?:email|emails|e mail|mail|mails|email id|mail id|phone|mobile|number|contact|call|telephone|cell)\b|@|\d|$)"
 
     patterns = [
-        r"\bname\s*[:=\-]\s*([A-Za-z .]+?)(?=\s+(?:email|e mail|mail|phone|mobile|number|contact|call)\b|@|\d|$)",
-        r"\bname\s+is\s+([A-Za-z .]+?)(?=\s+(?:email|e mail|mail|phone|mobile|number|contact|call)\b|@|\d|$)",
-        r"\bnamed\s+([A-Za-z .]+?)(?=\s+(?:email|e mail|mail|phone|mobile|number|contact|call)\b|@|\d|$)",
-        r"\bcalled\s+([A-Za-z .]+?)(?=\s+(?:email|e mail|mail|phone|mobile|number|contact|call)\b|@|\d|$)",
+        rf"\bname\s*[:=\-]\s*([A-Za-z .]+?){terminator}",
+        rf"\bname\s+(?:is|as)\s+([A-Za-z .]+?){terminator}",
+        rf"\bnamed\s*(?:as|is|[:=\-])?\s*([A-Za-z .]+?){terminator}",
+        rf"\bcalled\s*(?:as|is|[:=\-])?\s*([A-Za-z .]+?){terminator}",
     ]
 
+    all_matches = []
     for pattern in patterns:
-        matches = list(re.finditer(pattern, normalized, flags=re.IGNORECASE))
+        all_matches.extend(list(re.finditer(pattern, normalized, flags=re.IGNORECASE)))
 
-        if not matches:
-            continue
+    if not all_matches:
+        return ""
 
-        # Use the last explicit name marker.
-        # Example:
-        # "the name should be capital letters name: SHRESHTA"
-        # We want the second "name:" value, not the first instruction phrase.
-        raw_name = matches[-1].group(1).strip()
-        cleaned = clean_name_words(raw_name, preserve_case=True)
+    latest_match = max(all_matches, key=lambda match: match.start())
+    raw_name = latest_match.group(1).strip()
 
-        if cleaned:
-            return cleaned
-
-    return ""
+    return clean_name_words(raw_name, preserve_case=True)
 
 
 def make_email_from_words(local_raw: str, domain: str, tld: str) -> str:
@@ -168,7 +171,7 @@ def make_email_from_words(local_raw: str, domain: str, tld: str) -> str:
 
     marker_indexes = [
         i for i, token in enumerate(tokens)
-        if token.lower() in {"email", "mail", "e", "as", "at"}
+        if token.lower() in {"email", "emails", "mail", "mails", "e", "as", "at"}
     ]
 
     if marker_indexes:
@@ -233,13 +236,6 @@ def spoken_digit_sequence_to_number(text: str) -> str:
 
 
 def extract_phone_info(text: str) -> dict:
-    """
-    Strict rule:
-    - exactly 10 digits = valid
-    - 0 digits = phone missing
-    - less than 10 or more than 10 = invalid
-    - never crop 12 digits into 10 digits
-    """
     normalized = normalize_voice_text(text)
     text_without_email = EMAIL_RE.sub(" ", normalized)
 
@@ -283,6 +279,37 @@ def extract_phone_info(text: str) -> dict:
     }
 
 
+def remove_known_field_values(text: str) -> str:
+    normalized = normalize_voice_text(text)
+    normalized = EMAIL_RE.sub(" ", normalized)
+    normalized = DOMAIN_RE.sub(" ", normalized)
+    normalized = re.sub(r"(?<!\w)(?:\+?\d[\d\s\-().]*){5,}(?!\w)", " ", normalized)
+    normalized = FIELD_MARKER_RE.sub(" ", normalized)
+    normalized = remove_instruction_phrases(normalized)
+    return " ".join(normalized.split())
+
+
+def extract_fallback_name(text: str) -> str:
+    cleaned = remove_known_field_values(text)
+
+    marker_patterns = [
+        r"\bfor\s+([A-Za-z .]+)$",
+        r"\blead\s+for\s+([A-Za-z .]+)$",
+        r"\bcontact\s+for\s+([A-Za-z .]+)$",
+        r"\bdoctor\s+([A-Za-z .]+)$",
+        r"\bdr\.?\s+([A-Za-z .]+)$",
+    ]
+
+    for pattern in marker_patterns:
+        match = re.search(pattern, cleaned, flags=re.IGNORECASE)
+        if match:
+            name = clean_name_words(match.group(1), preserve_case=False)
+            if name:
+                return name
+
+    return clean_name_words(cleaned, preserve_case=False)
+
+
 def sanitize_name(raw_name: str, original_text: str) -> str:
     explicit_name = extract_explicit_name(original_text)
 
@@ -290,20 +317,7 @@ def sanitize_name(raw_name: str, original_text: str) -> str:
         return explicit_name
 
     source = raw_name or original_text or ""
-    text = normalize_voice_text(source)
-
-    text = EMAIL_RE.sub(" ", text)
-
-    marker = re.search(
-        r"(@|\b(email|e mail|mail|phone|mobile|number|gmail|yahoo|outlook|hotmail|icloud)\b|\d)",
-        text,
-        flags=re.IGNORECASE,
-    )
-
-    if marker:
-        text = text[:marker.start()]
-
-    return clean_name_words(text, preserve_case=False)
+    return extract_fallback_name(source)
 
 
 def extract_lead_details(text: str) -> dict:
@@ -312,12 +326,12 @@ def extract_lead_details(text: str) -> dict:
     explicit_name = extract_explicit_name(normalized)
     regex_email = extract_email(normalized)
     phone_info = extract_phone_info(normalized)
-    fallback_name = sanitize_name(normalized, normalized)
+    fallback_name = extract_fallback_name(normalized)
 
     prompt = f"""
 You are an AI CRM entity extraction engine.
 
-Extract ONLY these fields from the user message:
+Extract ONLY these CRM lead fields from the user message:
 - name
 - email
 - phone
@@ -326,28 +340,27 @@ Return ONLY valid JSON with keys: name, email, phone.
 
 Rules:
 - Understand natural typed or voice text like ChatGPT.
-- Extract only required CRM lead details.
-- Ignore user instruction phrases like "the name should be in capital letters".
-- If the input contains "name:" or "name is", use only the value after that marker as the name.
-- Remove command/filler words: create, add, lead, contact, please, as, and, at, dot.
+- Extract only actual field values, not instructions.
+- Ignore instruction phrases like "the name should be in capital letters".
+- If the input contains markers like "name:", "name is", "named", "named as", or "called", use only the value after that marker as name.
+- Stop name extraction before email/email(s)/mail/phone/mobile/number/contact/call markers.
 - Convert spoken email like "divya at gmail dot com" into "divya@gmail.com".
 - Email must always be lowercase.
-- If phone is present, keep the full digit string.
-- Never trim phone numbers.
+- Keep the full phone digit string. Never trim phone numbers.
 - If phone has spaces, join the digits.
 - If email is missing, return empty string.
 - If phone is missing, return empty string.
 
 Examples:
 
-Input: "Create a lead for Divya Sharma email divya at gmail dot com phone 997284 8672"
-Output: {{"name":"Divya Sharma","email":"divya@gmail.com","phone":"9972848672"}}
+Input: "create a lead named as Shrestha emails shreshta@gmail.com phone number 9901070 679"
+Output: {{"name":"Shrestha","email":"shreshta@gmail.com","phone":"9901070679"}}
 
 Input: "CREATE ME A LEAD THE NAME SHOULD BE IN CAPITAL LETTERS NAME: SHRESHTA EMAIL SHRESHTA@GMAIL.COM PHONE: 9901070679"
 Output: {{"name":"SHRESHTA","email":"shreshta@gmail.com","phone":"9901070679"}}
 
-Input: "As Divya Sharma Divya And 997284 8672"
-Output: {{"name":"Divya Sharma","email":"","phone":"9972848672"}}
+Input: "Create lead for Divya Sharma email divya at gmail dot com phone 997284 8672"
+Output: {{"name":"Divya Sharma","email":"divya@gmail.com","phone":"9972848672"}}
 
 Input: "Create lead for Ravi phone 123456789012"
 Output: {{"name":"Ravi","email":"","phone":"123456789012"}}
@@ -372,9 +385,6 @@ User input: {normalized}
 
     llm_name = sanitize_name(data.get("name", ""), normalized)
 
-    # Explicit marker wins over LLM result.
-    # This fixes:
-    # "THE NAME SHOULD BE IN CAPITOL LETTERS NAME: SHRESHTA..."
     name = explicit_name or llm_name or fallback_name
 
     email = (data.get("email", "") or regex_email or "").strip().lower()
