@@ -39,8 +39,10 @@ python -m uvicorn app.main:app --reload
 Edit `backend/.env`:
 
 ```env
-DATABASE_URL=sqlite:///./ai_crm.db
+DATABASE_URL=postgresql://postgres:your_postgres_password@localhost:5432/ai_first_crm
 GROQ_API_KEY=your_groq_key_here
+GROQ_MODEL=llama-3.1-8b-instant
+FRONTEND_URLS=http://localhost:5173,http://127.0.0.1:5173
 ```
 
 For PostgreSQL, replace `DATABASE_URL` with your PostgreSQL connection string.
