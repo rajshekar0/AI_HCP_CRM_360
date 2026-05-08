@@ -45,7 +45,7 @@ GROQ_MODEL=llama-3.1-8b-instant
 FRONTEND_URLS=http://localhost:5173,http://127.0.0.1:5173
 ```
 
-For PostgreSQL, replace `DATABASE_URL` with your PostgreSQL connection string.
+
 
 Backend runs at:
 
