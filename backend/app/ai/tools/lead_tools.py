@@ -48,6 +48,21 @@ def clean_email(email: str):
     return value, ""
 
 
+def existing_lead_response(existing, error_message: str):
+    return {
+        "message": "Lead already exists",
+        "saved": False,
+        "error": error_message,
+        "lead": {
+            "id": existing.id,
+            "name": existing.name,
+            "email": existing.email,
+            "phone": existing.phone,
+            "status": existing.status,
+        },
+    }
+
+
 def create_lead_tool(data: dict):
     db = SessionLocal()
 
@@ -92,21 +107,30 @@ def create_lead_tool(data: dict):
             }
 
         if email_value:
-            existing = db.query(models.Lead).filter(models.Lead.email == email_value).first()
+            existing_email = (
+                db.query(models.Lead)
+                .filter(models.Lead.email == email_value)
+                .first()
+            )
 
-            if existing:
-                return {
-                    "message": "Lead already exists",
-                    "saved": False,
-                    "error": "A lead with this email already exists.",
-                    "lead": {
-                        "id": existing.id,
-                        "name": existing.name,
-                        "email": existing.email,
-                        "phone": existing.phone,
-                        "status": existing.status,
-                    },
-                }
+            if existing_email:
+                return existing_lead_response(
+                    existing_email,
+                    "A lead with this email already exists.",
+                )
+
+        if phone_value:
+            existing_phone = (
+                db.query(models.Lead)
+                .filter(models.Lead.phone == phone_value)
+                .first()
+            )
+
+            if existing_phone:
+                return existing_lead_response(
+                    existing_phone,
+                    "A lead with this phone number already exists.",
+                )
 
         lead = models.Lead(
             name=name,
