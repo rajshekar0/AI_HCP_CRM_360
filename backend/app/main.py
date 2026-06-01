@@ -12,17 +12,30 @@ from app.routes.dashboard import router as dashboard_router
 from app.ai.tools.interaction_tools import log_interaction_tool
 
 
-app = FastAPI(title="AI First CRM", version="1.0.0")
+app = FastAPI(title="AI HCP-CRM 360 Backend", version="2.0.0")
 
 
-frontend_urls = os.getenv(
-    "FRONTEND_URLS",
-    "http://localhost:5173,http://127.0.0.1:5173"
-).split(",")
+DEFAULT_FRONTEND_URLS = [
+    "http://localhost:5173",
+    "http://127.0.0.1:5173",
+    "https://ai-hcp-crm-360.vercel.app",
+    "https://ai-first-crm-frontend.vercel.app",
+]
+
+frontend_urls_from_env = [
+    url.strip()
+    for url in os.getenv("FRONTEND_URLS", "").split(",")
+    if url.strip()
+]
+
+allowed_frontend_urls = list(
+    dict.fromkeys(DEFAULT_FRONTEND_URLS + frontend_urls_from_env)
+)
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[url.strip() for url in frontend_urls if url.strip()],
+    allow_origins=allowed_frontend_urls,
+    allow_origin_regex=r"https://.*\.vercel\.app",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -66,8 +79,6 @@ def ensure_lead_columns():
                             )
                         )
 
-                # Keep existing valid designations as they are.
-                # Only old null/blank rows become "other".
                 connection.execute(
                     text(
                         """
@@ -78,7 +89,6 @@ def ensure_lead_columns():
                     )
                 )
 
-                # Ensure future DB-level default is also "other".
                 connection.execute(
                     text(
                         """
@@ -246,10 +256,14 @@ def get_system_status():
         "status": "healthy"
         if database_status["status"] == "connected"
         else "degraded",
-        "service": "AI First CRM Backend",
-        "message": "AI First CRM Backend is running",
-        "version": "1.0.0",
+        "service": "AI HCP-CRM 360 Backend",
+        "message": "AI HCP-CRM 360 Backend is running",
+        "version": "2.0.0",
         "database": database_status,
+        "cors": {
+            "allowed_frontend_urls": allowed_frontend_urls,
+            "vercel_preview_allowed": True,
+        },
         "available_routes": {
             "root": "/",
             "status": "/status",
@@ -284,7 +298,8 @@ def status():
 def health_check():
     return {
         "status": "healthy",
-        "service": "AI First CRM Backend"
+        "service": "AI HCP-CRM 360 Backend",
+        "version": "2.0.0",
     }
 
 
@@ -324,7 +339,7 @@ class InteractionCreate(BaseModel):
 def chat(req: ChatRequest):
     result = graph_app.invoke({
         "input": req.input,
-        "session_id": req.session_id
+        "session_id": req.session_id,
     })
     return result
 
@@ -332,7 +347,7 @@ def chat(req: ChatRequest):
 @app.post("/leads")
 def create_lead(
     lead: schemas.LeadCreate,
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
 ):
     return crud.create_lead(db, lead)
 
@@ -346,7 +361,7 @@ def get_leads(db: Session = Depends(get_db)):
 def update_lead(
     lead_id: int,
     lead_update: schemas.LeadUpdate,
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
 ):
     lead = crud.update_lead(db, lead_id, lead_update)
 
@@ -359,7 +374,7 @@ def update_lead(
 @app.delete("/leads/{lead_id}")
 def delete_lead(
     lead_id: int,
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
 ):
     lead = crud.delete_lead(db, lead_id)
 
@@ -367,21 +382,21 @@ def delete_lead(
         raise HTTPException(status_code=404, detail="Lead not found")
 
     return {
-        "message": "Lead deleted successfully"
+        "message": "Lead deleted successfully",
     }
 
 
 @app.post("/interactions")
 def create_interaction(
     payload: InteractionCreate,
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
 ):
     notes = (payload.notes or "").strip()
 
     if not notes:
         raise HTTPException(
             status_code=400,
-            detail="Interaction notes are required"
+            detail="Interaction notes are required",
         )
 
     lead = (
@@ -393,7 +408,7 @@ def create_interaction(
     if not lead:
         raise HTTPException(
             status_code=404,
-            detail=f"Lead ID {payload.lead_id} not found"
+            detail=f"Lead ID {payload.lead_id} not found",
         )
 
     result = log_interaction_tool({
@@ -438,7 +453,7 @@ def get_interactions(db: Session = Depends(get_db)):
     return [
         serialize_interaction(
             interaction,
-            leads_by_id.get(interaction.lead_id)
+            leads_by_id.get(interaction.lead_id),
         )
         for interaction in interactions
     ]
@@ -448,7 +463,7 @@ def get_interactions(db: Session = Depends(get_db)):
 def update_interaction_follow_up_status(
     interaction_id: int,
     payload: FollowUpStatusUpdate,
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
 ):
     allowed_statuses = {"pending", "completed", "ignored"}
     status = (payload.status or "").strip().lower()
@@ -456,7 +471,7 @@ def update_interaction_follow_up_status(
     if status not in allowed_statuses:
         raise HTTPException(
             status_code=400,
-            detail="Invalid follow-up status. Use pending, completed, or ignored."
+            detail="Invalid follow-up status. Use pending, completed, or ignored.",
         )
 
     interaction = (
@@ -468,7 +483,7 @@ def update_interaction_follow_up_status(
     if not interaction:
         raise HTTPException(
             status_code=404,
-            detail="Interaction not found"
+            detail="Interaction not found",
         )
 
     interaction.follow_up_status = status
@@ -488,7 +503,7 @@ def clear_interactions(db: Session = Depends(get_db)):
     db.commit()
 
     return {
-        "message": "Interactions cleared successfully"
+        "message": "Interactions cleared successfully",
     }
 
 
@@ -526,12 +541,12 @@ def reset_all_data(db: Session = Depends(get_db)):
             db.commit()
 
         return {
-            "message": "All database records cleared and IDs reset to 1"
+            "message": "All database records cleared and IDs reset to 1",
         }
 
     except Exception as e:
         db.rollback()
         raise HTTPException(
             status_code=500,
-            detail=f"Reset failed: {str(e)}"
+            detail=f"Reset failed: {str(e)}",
         )
