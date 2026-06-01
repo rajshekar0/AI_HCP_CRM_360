@@ -668,11 +668,11 @@ function Leads({ darkMode }) {
           <div className="flex-1 min-h-0 overflow-y-auto overflow-x-hidden custom-scrollbar">
             <table className="w-full table-fixed">
               <colgroup>
-                <col className="w-[27%]" />
-                <col className="w-[13%]" />
-                <col className="w-[19%]" />
+                <col className="w-[25%]" />
+                <col className="w-[12%]" />
+                <col className="w-[24%]" />
                 <col className="w-[15%]" />
-                <col className="w-[14%]" />
+                <col className="w-[13%]" />
                 <col className="w-[12%]" />
               </colgroup>
 
@@ -739,8 +739,10 @@ function Leads({ darkMode }) {
                         </span>
                       </td>
 
-                      <td className="px-4 py-3.5 truncate align-middle" title={lead.email || ""}>
-                        {lead.email || "—"}
+                      <td className="px-4 py-3.5 align-middle text-sm" title={lead.email || ""}>
+                      <span className="block whitespace-normal break-all leading-5">
+                      {lead.email || "—"}
+                       </span>
                       </td>
 
                       <td
