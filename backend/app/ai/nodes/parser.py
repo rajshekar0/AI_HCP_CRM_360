@@ -14,7 +14,11 @@ PHONE_KEYWORD_RE = re.compile(
     re.IGNORECASE,
 )
 FIELD_MARKER_RE = re.compile(
-    r"\b(email|emails|e mail|mail|mails|email id|mail id|phone|mobile|number|contact|call|telephone|cell)\b",
+    r"\b(email|emails|e mail|mail|mails|email id|mail id|phone|mobile|number|contact|call|telephone|cell|designation|designated|role)\b",
+    re.IGNORECASE,
+)
+DESIGNATION_FIELD_RE = re.compile(
+    r"\b(?:designation|designated|role|as)\s*[:=\-]?\s*(doctor|dr|physician|nurse|pharmacist|admin|administrator|other)\b",
     re.IGNORECASE,
 )
 
@@ -22,7 +26,8 @@ FILLER_WORDS = {
     "can", "you", "could", "please", "kindly",
     "create", "make", "add", "register", "save", "store",
     "new", "lead", "contact", "crm", "customer", "prospect",
-    "doctor", "hcp", "physician",
+    "doctor", "dr", "hcp", "physician", "nurse", "pharmacist",
+    "admin", "administrator", "other", "designation", "designated", "role",
     "for", "with", "email", "emails", "mail", "mails", "e",
     "phone", "number", "mobile", "called", "named", "name",
     "a", "an", "the", "me",
@@ -48,6 +53,19 @@ SPOKEN_DIGITS = {
     "eight": "8",
     "nine": "9",
 }
+
+DESIGNATION_ALIASES = {
+    "dr": "doctor",
+    "doctor": "doctor",
+    "physician": "doctor",
+    "nurse": "nurse",
+    "pharmacist": "pharmacist",
+    "admin": "admin",
+    "administrator": "admin",
+    "other": "other",
+}
+
+VALID_DESIGNATIONS = {"doctor", "nurse", "pharmacist", "admin", "other"}
 
 
 def clean_json_response(text: str) -> str:
@@ -77,6 +95,9 @@ def normalize_voice_text(text: str) -> str:
 
     normalized = re.sub(r"\s*@\s*", "@", normalized)
     normalized = re.sub(r"\s*\.\s*", ".", normalized)
+
+    # Prevent names like "Dr.Divya" after dot normalization.
+    normalized = re.sub(r"\bdr\.\s*", "Dr ", normalized, flags=re.IGNORECASE)
 
     return " ".join(normalized.split())
 
@@ -113,8 +134,36 @@ def remove_duplicate_words(words):
     return result
 
 
+def normalize_designation(value: str) -> str:
+    key = (value or "").strip().lower().replace(".", "")
+    return DESIGNATION_ALIASES.get(key, "")
+
+
+def extract_designation(text: str) -> str:
+    normalized = normalize_voice_text(text)
+
+    explicit_match = DESIGNATION_FIELD_RE.search(normalized)
+    if explicit_match:
+        designation = normalize_designation(explicit_match.group(1))
+        if designation in VALID_DESIGNATIONS:
+            return designation
+
+    # Doctor prefix should automatically map to doctor.
+    if re.search(r"\b(?:dr|doctor|physician)\.?\s+[A-Za-z]", normalized, flags=re.IGNORECASE):
+        return "doctor"
+
+    return ""
+
+
+def strip_designation_text(text: str) -> str:
+    text = DESIGNATION_FIELD_RE.sub(" ", text or "")
+    return " ".join(text.split())
+
+
 def clean_name_words(text: str, preserve_case: bool = False) -> str:
     text = remove_instruction_phrases(text)
+    text = strip_designation_text(text)
+    text = re.sub(r"\bdr\.?\b", " ", text, flags=re.IGNORECASE)
     text = re.sub(r"[^a-zA-Z\s.]", " ", text)
 
     words = []
@@ -144,7 +193,7 @@ def clean_name_words(text: str, preserve_case: bool = False) -> str:
 
 def extract_explicit_name(text: str) -> str:
     normalized = normalize_voice_text(text)
-    terminator = r"(?=\s+(?:email|emails|e mail|mail|mails|email id|mail id|phone|mobile|number|contact|call|telephone|cell)\b|@|\d|$)"
+    terminator = r"(?=\s+(?:email|emails|e mail|mail|mails|email id|mail id|phone|mobile|number|contact|call|telephone|cell|designation|designated|role)\b|@|\d|$)"
 
     patterns = [
         rf"\bname\s*[:=\-]\s*([A-Za-z .]+?){terminator}",
@@ -284,6 +333,7 @@ def remove_known_field_values(text: str) -> str:
     normalized = EMAIL_RE.sub(" ", normalized)
     normalized = DOMAIN_RE.sub(" ", normalized)
     normalized = re.sub(r"(?<!\w)(?:\+?\d[\d\s\-().]*){5,}(?!\w)", " ", normalized)
+    normalized = DESIGNATION_FIELD_RE.sub(" ", normalized)
     normalized = FIELD_MARKER_RE.sub(" ", normalized)
     normalized = remove_instruction_phrases(normalized)
     return " ".join(normalized.split())
@@ -327,6 +377,7 @@ def extract_lead_details(text: str) -> dict:
     regex_email = extract_email(normalized)
     phone_info = extract_phone_info(normalized)
     fallback_name = extract_fallback_name(normalized)
+    detected_designation = extract_designation(normalized)
 
     prompt = f"""
 You are an AI CRM entity extraction engine.
@@ -335,35 +386,36 @@ Extract ONLY these CRM lead fields from the user message:
 - name
 - email
 - phone
+- designation
 
-Return ONLY valid JSON with keys: name, email, phone.
+Return ONLY valid JSON with keys: name, email, phone, designation.
 
 Rules:
 - Understand natural typed or voice text like ChatGPT.
 - Extract only actual field values, not instructions.
 - Ignore instruction phrases like "the name should be in capital letters".
 - If the input contains markers like "name:", "name is", "named", "named as", or "called", use only the value after that marker as name.
-- Stop name extraction before email/email(s)/mail/phone/mobile/number/contact/call markers.
+- Stop name extraction before email/email(s)/mail/phone/mobile/number/contact/call/designation markers.
 - Convert spoken email like "divya at gmail dot com" into "divya@gmail.com".
 - Email must always be lowercase.
 - Keep the full phone digit string. Never trim phone numbers.
 - If phone has spaces, join the digits.
+- If designation is written as doctor, nurse, pharmacist, admin, or other, extract it.
+- If name starts with Dr. or Doctor, set designation to doctor and remove Dr./Doctor from the name.
+- If designation is missing, return empty string.
 - If email is missing, return empty string.
 - If phone is missing, return empty string.
 
 Examples:
 
-Input: "create a lead named as Shrestha emails shreshta@gmail.com phone number 9901070 679"
-Output: {{"name":"Shrestha","email":"shreshta@gmail.com","phone":"9901070679"}}
+Input: "Create a lead for Dr. Divya Sharma email divya@gmail.com phone 9876543212"
+Output: {{"name":"Divya Sharma","email":"divya@gmail.com","phone":"9876543212","designation":"doctor"}}
 
-Input: "CREATE ME A LEAD THE NAME SHOULD BE IN CAPITAL LETTERS NAME: SHRESHTA EMAIL SHRESHTA@GMAIL.COM PHONE: 9901070679"
-Output: {{"name":"SHRESHTA","email":"shreshta@gmail.com","phone":"9901070679"}}
+Input: "Create a lead for Shreshta Gowda H J email shreshta@gmail.com phone 9876543212 designation pharmacist"
+Output: {{"name":"Shreshta Gowda H J","email":"shreshta@gmail.com","phone":"9876543212","designation":"pharmacist"}}
 
-Input: "Create lead for Divya Sharma email divya at gmail dot com phone 997284 8672"
-Output: {{"name":"Divya Sharma","email":"divya@gmail.com","phone":"9972848672"}}
-
-Input: "Create lead for Ravi phone 123456789012"
-Output: {{"name":"Ravi","email":"","phone":"123456789012"}}
+Input: "Create lead for Ravi phone 123456789012 designation nurse"
+Output: {{"name":"Ravi","email":"","phone":"123456789012","designation":"nurse"}}
 
 User input: {normalized}
 """
@@ -373,6 +425,7 @@ User input: {normalized}
             "name": explicit_name or fallback_name,
             "email": regex_email,
             "phone": phone_info["phone"],
+            "designation": detected_designation,
         }
     )
 
@@ -386,9 +439,9 @@ User input: {normalized}
     llm_name = sanitize_name(data.get("name", ""), normalized)
 
     name = explicit_name or llm_name or fallback_name
-
     email = (data.get("email", "") or regex_email or "").strip().lower()
     phone = (data.get("phone", "") or phone_info["phone"] or "").strip()
+    designation = detected_designation or normalize_designation(data.get("designation", ""))
 
     if regex_email:
         email = regex_email.lower()
@@ -408,10 +461,14 @@ User input: {normalized}
                 f"You entered {len(digits)} digits."
             )
 
+    if not designation and not validation_error:
+        validation_error = "Please specify the HCP designation: doctor, nurse, pharmacist, admin, or other."
+
     return {
         "name": name,
         "email": email,
         "phone": phone,
+        "designation": designation,
         "validation_error": validation_error,
     }
 
@@ -430,6 +487,7 @@ def parser(state: AgentState):
                 "name": lead_data["name"],
                 "email": lead_data["email"],
                 "phone": lead_data["phone"],
+                "designation": lead_data.get("designation", ""),
                 "status": "new",
                 "validation_error": lead_data.get("validation_error", ""),
             },

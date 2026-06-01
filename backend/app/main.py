@@ -9,6 +9,7 @@ from .database import engine, get_db
 from . import models, schemas, crud
 from app.ai.agent import app as graph_app
 from app.routes.dashboard import router as dashboard_router
+from app.ai.tools.interaction_tools import log_interaction_tool
 
 
 app = FastAPI(title="AI First CRM", version="1.0.0")
@@ -29,7 +30,178 @@ app.add_middleware(
 
 
 models.Base.metadata.create_all(bind=engine)
+
+
+def ensure_lead_columns():
+    required_columns = {
+        "first_name": "VARCHAR",
+        "last_name": "VARCHAR",
+        "initials": "VARCHAR",
+        "designation": "VARCHAR DEFAULT 'other'",
+    }
+
+    try:
+        with engine.connect() as connection:
+            db_type = engine.url.get_backend_name()
+
+            if db_type == "postgresql":
+                existing_columns = connection.execute(
+                    text(
+                        """
+                        SELECT column_name
+                        FROM information_schema.columns
+                        WHERE table_name = 'leads'
+                        """
+                    )
+                ).fetchall()
+
+                existing_column_names = {row[0] for row in existing_columns}
+
+                for column_name, column_type in required_columns.items():
+                    if column_name not in existing_column_names:
+                        connection.execute(
+                            text(
+                                f"ALTER TABLE leads "
+                                f"ADD COLUMN {column_name} {column_type};"
+                            )
+                        )
+
+                # Keep existing valid designations as they are.
+                # Only old null/blank rows become "other".
+                connection.execute(
+                    text(
+                        """
+                        UPDATE leads
+                        SET designation = 'other'
+                        WHERE designation IS NULL OR designation = '';
+                        """
+                    )
+                )
+
+                # Ensure future DB-level default is also "other".
+                connection.execute(
+                    text(
+                        """
+                        ALTER TABLE leads
+                        ALTER COLUMN designation SET DEFAULT 'other';
+                        """
+                    )
+                )
+
+                connection.commit()
+
+            elif db_type == "sqlite":
+                existing_columns = connection.execute(
+                    text("PRAGMA table_info(leads);")
+                ).fetchall()
+
+                existing_column_names = {row[1] for row in existing_columns}
+
+                for column_name, column_type in required_columns.items():
+                    if column_name not in existing_column_names:
+                        connection.execute(
+                            text(
+                                f"ALTER TABLE leads "
+                                f"ADD COLUMN {column_name} {column_type};"
+                            )
+                        )
+
+                connection.execute(
+                    text(
+                        """
+                        UPDATE leads
+                        SET designation = 'other'
+                        WHERE designation IS NULL OR designation = '';
+                        """
+                    )
+                )
+
+                connection.commit()
+
+    except Exception as error:
+        print(f"Lead column migration skipped/failed: {error}")
+
+
+def ensure_interaction_columns():
+    required_columns = {
+        "follow_up": "TEXT",
+        "tags": "TEXT",
+        "follow_up_status": "VARCHAR DEFAULT 'pending'",
+    }
+
+    try:
+        with engine.connect() as connection:
+            db_type = engine.url.get_backend_name()
+
+            if db_type == "postgresql":
+                existing_columns = connection.execute(
+                    text(
+                        """
+                        SELECT column_name
+                        FROM information_schema.columns
+                        WHERE table_name = 'interactions'
+                        """
+                    )
+                ).fetchall()
+
+                existing_column_names = {row[0] for row in existing_columns}
+
+                for column_name, column_type in required_columns.items():
+                    if column_name not in existing_column_names:
+                        connection.execute(
+                            text(
+                                f"ALTER TABLE interactions "
+                                f"ADD COLUMN {column_name} {column_type};"
+                            )
+                        )
+
+                connection.commit()
+
+            elif db_type == "sqlite":
+                existing_columns = connection.execute(
+                    text("PRAGMA table_info(interactions);")
+                ).fetchall()
+
+                existing_column_names = {row[1] for row in existing_columns}
+
+                for column_name, column_type in required_columns.items():
+                    if column_name not in existing_column_names:
+                        connection.execute(
+                            text(
+                                f"ALTER TABLE interactions "
+                                f"ADD COLUMN {column_name} {column_type};"
+                            )
+                        )
+
+                connection.commit()
+
+    except Exception as error:
+        print(f"Interaction column migration skipped/failed: {error}")
+
+
+ensure_lead_columns()
+ensure_interaction_columns()
 app.include_router(dashboard_router)
+
+
+def serialize_interaction(interaction, lead=None):
+    return {
+        "id": interaction.id,
+        "lead_id": interaction.lead_id,
+        "lead_name": lead.name if lead else None,
+        "lead_email": lead.email if lead else None,
+        "lead_phone": lead.phone if lead else None,
+        "lead_designation": lead.designation if lead else None,
+        "notes": interaction.notes,
+        "summary": interaction.summary,
+        "sentiment": interaction.sentiment,
+        "follow_up": interaction.follow_up,
+        "tags": interaction.tags,
+        "follow_up_status": interaction.follow_up_status,
+        "created_at": interaction.created_at.isoformat()
+        if getattr(interaction, "created_at", None)
+        else None,
+    }
 
 
 def get_system_status():
@@ -82,10 +254,15 @@ def get_system_status():
             "root": "/",
             "status": "/status",
             "health": "/health",
-            "docs": "/docs",
+            "ai_status": "/ai/status",
             "chat": "/chat",
-            "leads": "/leads",
-            "interactions": "/interactions",
+            "leads_create": "POST /leads",
+            "leads_list": "GET /leads",
+            "leads_update": "PUT /leads/{lead_id}",
+            "leads_delete": "DELETE /leads/{lead_id}",
+            "interactions_create": "POST /interactions",
+            "interactions_list": "GET /interactions",
+            "interaction_follow_up_status": "/interactions/{interaction_id}/follow-up-status",
             "dashboard_stats": "/dashboard/stats",
             "clear_interactions": "/clear-interactions",
             "reset_all": "/reset-all",
@@ -111,9 +288,36 @@ def health_check():
     }
 
 
+@app.get("/ai/status")
+def ai_status():
+    groq_key_configured = bool(os.getenv("GROQ_API_KEY"))
+
+    return {
+        "status": "active" if groq_key_configured else "degraded",
+        "service": "AI Engine",
+        "langgraph": "active",
+        "llm_provider": "groq",
+        "api_key_configured": groq_key_configured,
+        "message": (
+            "AI engine is configured"
+            if groq_key_configured
+            else "AI engine route is available, but Groq API key is not configured"
+        ),
+    }
+
+
 class ChatRequest(BaseModel):
     input: str
     session_id: str = "default"
+
+
+class FollowUpStatusUpdate(BaseModel):
+    status: str
+
+
+class InteractionCreate(BaseModel):
+    lead_id: int
+    notes: str
 
 
 @app.post("/chat")
@@ -167,13 +371,115 @@ def delete_lead(
     }
 
 
+@app.post("/interactions")
+def create_interaction(
+    payload: InteractionCreate,
+    db: Session = Depends(get_db)
+):
+    notes = (payload.notes or "").strip()
+
+    if not notes:
+        raise HTTPException(
+            status_code=400,
+            detail="Interaction notes are required"
+        )
+
+    lead = (
+        db.query(models.Lead)
+        .filter(models.Lead.id == payload.lead_id)
+        .first()
+    )
+
+    if not lead:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Lead ID {payload.lead_id} not found"
+        )
+
+    result = log_interaction_tool({
+        "lead_id": payload.lead_id,
+        "notes": notes,
+    })
+
+    return {
+        **result,
+        "lead_id": lead.id,
+        "lead_name": lead.name,
+        "lead_email": lead.email,
+        "lead_phone": lead.phone,
+        "lead_designation": lead.designation,
+    }
+
+
 @app.get("/interactions")
 def get_interactions(db: Session = Depends(get_db)):
-    return (
+    interactions = (
         db.query(models.Interaction)
         .order_by(models.Interaction.created_at.desc())
         .all()
     )
+
+    lead_ids = {
+        interaction.lead_id
+        for interaction in interactions
+        if interaction.lead_id is not None
+    }
+
+    leads = (
+        db.query(models.Lead)
+        .filter(models.Lead.id.in_(lead_ids))
+        .all()
+        if lead_ids
+        else []
+    )
+
+    leads_by_id = {lead.id: lead for lead in leads}
+
+    return [
+        serialize_interaction(
+            interaction,
+            leads_by_id.get(interaction.lead_id)
+        )
+        for interaction in interactions
+    ]
+
+
+@app.put("/interactions/{interaction_id}/follow-up-status")
+def update_interaction_follow_up_status(
+    interaction_id: int,
+    payload: FollowUpStatusUpdate,
+    db: Session = Depends(get_db)
+):
+    allowed_statuses = {"pending", "completed", "ignored"}
+    status = (payload.status or "").strip().lower()
+
+    if status not in allowed_statuses:
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid follow-up status. Use pending, completed, or ignored."
+        )
+
+    interaction = (
+        db.query(models.Interaction)
+        .filter(models.Interaction.id == interaction_id)
+        .first()
+    )
+
+    if not interaction:
+        raise HTTPException(
+            status_code=404,
+            detail="Interaction not found"
+        )
+
+    interaction.follow_up_status = status
+    db.commit()
+    db.refresh(interaction)
+
+    return {
+        "message": "Follow-up status updated successfully",
+        "interaction_id": interaction.id,
+        "follow_up_status": interaction.follow_up_status,
+    }
 
 
 @app.delete("/clear-interactions")

@@ -1,4 +1,5 @@
 {
+  "name": "ai-hcp-crm-360",
   "type": "module",
   "scripts": {
     "dev": "vite",

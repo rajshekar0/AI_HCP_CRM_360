@@ -4,9 +4,15 @@ from fastapi import HTTPException
 from . import models, schemas
 
 
-def check_duplicate_email(db: Session, email: str, exclude_lead_id: int | None = None):
+def check_duplicate_email(
+    db: Session,
+    email: str | None,
+    exclude_lead_id: int | None = None
+):
     if not email:
         return
+
+    email = str(email).strip().lower()
 
     query = db.query(models.Lead).filter(models.Lead.email == email)
 
@@ -22,9 +28,15 @@ def check_duplicate_email(db: Session, email: str, exclude_lead_id: int | None =
         )
 
 
-def check_duplicate_phone(db: Session, phone: str, exclude_lead_id: int | None = None):
+def check_duplicate_phone(
+    db: Session,
+    phone: str | None,
+    exclude_lead_id: int | None = None
+):
     if not phone:
         return
+
+    phone = str(phone).strip()
 
     query = db.query(models.Lead).filter(models.Lead.phone == phone)
 
@@ -41,14 +53,30 @@ def check_duplicate_phone(db: Session, phone: str, exclude_lead_id: int | None =
 
 
 def create_lead(db: Session, lead: schemas.LeadCreate):
+    """
+    Create a lead with SaaS-level rules:
+    - first name required
+    - email required
+    - phone required
+    - email unique
+    - phone unique
+    - Dr./Doctor prefix is stripped by schema
+    - designation is doctor only when detected/provided, otherwise other
+    - status starts as new
+    """
+
     check_duplicate_email(db, lead.email)
     check_duplicate_phone(db, lead.phone)
 
     db_lead = models.Lead(
         name=lead.name,
-        email=lead.email,
+        first_name=lead.first_name,
+        last_name=lead.last_name,
+        initials=lead.initials,
+        email=str(lead.email).lower() if lead.email else None,
         phone=lead.phone,
-        status=lead.status or "new",
+        designation=lead.designation or "other",
+        status="new",
     )
 
     try:
@@ -66,10 +94,23 @@ def create_lead(db: Session, lead: schemas.LeadCreate):
 
 
 def get_leads(db: Session):
-    return db.query(models.Lead).order_by(models.Lead.created_at.desc()).all()
+    return (
+        db.query(models.Lead)
+        .order_by(models.Lead.created_at.desc())
+        .all()
+    )
 
 
 def update_lead(db: Session, lead_id: int, lead_update: schemas.LeadUpdate):
+    """
+    Product-safe lead update:
+    - name fields are locked after creation
+    - designation is locked after creation
+    - email can be updated if unique
+    - phone can be updated if unique
+    - status can be updated from table dropdown
+    """
+
     lead = db.query(models.Lead).filter(models.Lead.id == lead_id).first()
 
     if not lead:
@@ -81,11 +122,15 @@ def update_lead(db: Session, lead_id: int, lead_update: schemas.LeadUpdate):
     if lead_update.phone is not None:
         check_duplicate_phone(db, lead_update.phone, exclude_lead_id=lead_id)
 
-    if lead_update.name is not None:
-        lead.name = lead_update.name
+    # Identity fields intentionally ignored after creation.
+    # lead.name is not updated here.
+    # lead.first_name is not updated here.
+    # lead.last_name is not updated here.
+    # lead.initials is not updated here.
+    # lead.designation is not updated here.
 
     if lead_update.email is not None:
-        lead.email = lead_update.email
+        lead.email = str(lead_update.email).lower() if lead_update.email else None
 
     if lead_update.phone is not None:
         lead.phone = lead_update.phone

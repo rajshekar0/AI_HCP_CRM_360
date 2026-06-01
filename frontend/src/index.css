@@ -19,3 +19,77 @@ body,
 body {
   overflow: hidden;
 }
+/* ------------------------------------------------------------------
+   AI_FIRST_CRM UI polish: invisible scrollbars
+   Paste this block at the END of:
+   frontend/src/index.css
+
+   Purpose:
+   - Keeps scrolling behavior working
+   - Hides white/native scrollbars in dark mode
+   - Applies to page scroll, table overflow, chat scroll, logs, dashboard,
+     lead status dropdowns, and interaction status dropdowns
+------------------------------------------------------------------ */
+
+/* Firefox */
+html,
+body,
+#root,
+* {
+  scrollbar-width: none;
+}
+
+/* Internet Explorer / old Edge */
+html,
+body,
+#root,
+* {
+  -ms-overflow-style: none;
+}
+
+/* Chrome / Edge / Safari */
+html::-webkit-scrollbar,
+body::-webkit-scrollbar,
+#root::-webkit-scrollbar,
+*::-webkit-scrollbar {
+  width: 0px;
+  height: 0px;
+  display: none;
+}
+
+/* Preserve smooth scrolling while keeping scrollbars invisible */
+html {
+  scroll-behavior: smooth;
+}
+
+body {
+  overflow-x: hidden;
+}
+
+/* Utility class if you want to hide scrollbar only on selected containers */
+.no-scrollbar {
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+
+.no-scrollbar::-webkit-scrollbar {
+  width: 0px;
+  height: 0px;
+  display: none;
+}
+.custom-scrollbar::-webkit-scrollbar {
+  width: 8px;
+}
+
+.custom-scrollbar::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.custom-scrollbar::-webkit-scrollbar-thumb {
+  background: rgba(99, 102, 241, 0.45);
+  border-radius: 999px;
+}
+
+.custom-scrollbar::-webkit-scrollbar-thumb:hover {
+  background: rgba(99, 102, 241, 0.7);
+}
