@@ -276,9 +276,9 @@ def get_system_status():
             "leads_delete": "DELETE /leads/{lead_id}",
             "interactions_create": "POST /interactions",
             "interactions_list": "GET /interactions",
+            "interactions_delete": "DELETE /interactions/{interaction_id}",
             "interaction_follow_up_status": "/interactions/{interaction_id}/follow-up-status",
             "dashboard_stats": "/dashboard/stats",
-            "clear_interactions": "/clear-interactions",
             "reset_all": "/reset-all",
         },
     }
@@ -376,10 +376,36 @@ def delete_lead(
     lead_id: int,
     db: Session = Depends(get_db),
 ):
-    lead = crud.delete_lead(db, lead_id)
+    lead = (
+        db.query(models.Lead)
+        .filter(models.Lead.id == lead_id)
+        .first()
+    )
 
     if not lead:
-        raise HTTPException(status_code=404, detail="Lead not found")
+        raise HTTPException(
+            status_code=404,
+            detail="Lead not found",
+        )
+
+    linked_interactions_count = (
+        db.query(models.Interaction)
+        .filter(models.Interaction.lead_id == lead_id)
+        .count()
+    )
+
+    if linked_interactions_count > 0:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"Cannot delete this lead because it has "
+                f"{linked_interactions_count} linked interaction(s). "
+                "Please delete the linked interaction history first, then delete the lead."
+            ),
+        )
+
+    db.delete(lead)
+    db.commit()
 
     return {
         "message": "Lead deleted successfully",
@@ -459,6 +485,32 @@ def get_interactions(db: Session = Depends(get_db)):
     ]
 
 
+@app.delete("/interactions/{interaction_id}")
+def delete_interaction(
+    interaction_id: int,
+    db: Session = Depends(get_db),
+):
+    interaction = (
+        db.query(models.Interaction)
+        .filter(models.Interaction.id == interaction_id)
+        .first()
+    )
+
+    if not interaction:
+        raise HTTPException(
+            status_code=404,
+            detail="Interaction not found",
+        )
+
+    db.delete(interaction)
+    db.commit()
+
+    return {
+        "message": "Interaction deleted successfully",
+        "interaction_id": interaction_id,
+    }
+
+
 @app.put("/interactions/{interaction_id}/follow-up-status")
 def update_interaction_follow_up_status(
     interaction_id: int,
@@ -494,16 +546,6 @@ def update_interaction_follow_up_status(
         "message": "Follow-up status updated successfully",
         "interaction_id": interaction.id,
         "follow_up_status": interaction.follow_up_status,
-    }
-
-
-@app.delete("/clear-interactions")
-def clear_interactions(db: Session = Depends(get_db)):
-    db.query(models.Interaction).delete()
-    db.commit()
-
-    return {
-        "message": "Interactions cleared successfully",
     }
 
 

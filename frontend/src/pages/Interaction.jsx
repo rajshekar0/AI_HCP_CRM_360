@@ -2,7 +2,6 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import {
   ClipboardList,
   Sparkles,
-  Activity,
   Trash2,
   Search,
   Filter,
@@ -14,6 +13,8 @@ import {
   Link2,
   FileText,
   Eye,
+  Mic,
+  MicOff,
 } from "lucide-react";
 import { motion, AnimatePresence } from "framer-motion";
 import { API_BASE_URL } from "../config";
@@ -44,6 +45,8 @@ function formatTagLabel(tag) {
 function Interaction({ darkMode }) {
   const leadDropdownRef = useRef(null);
   const sentimentDropdownRef = useRef(null);
+  const recognitionRef = useRef(null);
+  const voiceBaseNotesRef = useRef("");
 
   const [notes, setNotes] = useState("");
   const [result, setResult] = useState(null);
@@ -56,9 +59,21 @@ function Interaction({ darkMode }) {
   const [search, setSearch] = useState("");
   const [sentimentFilter, setSentimentFilter] = useState("all");
   const [sentimentDropdownOpen, setSentimentDropdownOpen] = useState(false);
-  const [showClearConfirm, setShowClearConfirm] = useState(false);
   const [openStatusMenu, setOpenStatusMenu] = useState(null);
   const [selectedInteractionId, setSelectedInteractionId] = useState(null);
+
+  const [notice, setNotice] = useState({ type: "", message: "" });
+  const [isListening, setIsListening] = useState(false);
+
+  const [deleteTarget, setDeleteTarget] = useState(null);
+  const speechRecognitionSupported =
+    typeof window !== "undefined" &&
+    (window.SpeechRecognition || window.webkitSpeechRecognition);
+
+  const showNotice = (message, type = "success") => {
+    setNotice({ message, type });
+    setTimeout(() => setNotice({ type: "", message: "" }), 3500);
+  };
 
   useEffect(() => {
     fetchHistory();
@@ -97,12 +112,45 @@ function Interaction({ darkMode }) {
     return () => {
       document.removeEventListener("mousedown", handleOutsideClick);
       document.removeEventListener("keydown", handleEscape);
+
+      if (recognitionRef.current) {
+        recognitionRef.current.abort?.();
+      }
     };
   }, []);
+
+  const getApiError = async (res) => {
+    try {
+      const data = await res.json();
+
+      if (typeof data?.detail === "string") return data.detail;
+
+      if (Array.isArray(data?.detail)) {
+        return data.detail
+          .map((item) => {
+            const field = Array.isArray(item?.loc)
+              ? item.loc[item.loc.length - 1]
+              : "field";
+            const message = item?.msg || "Invalid value";
+            return `${field}: ${message}`;
+          })
+          .join("\n");
+      }
+
+      return data?.error || data?.message || "Request failed";
+    } catch {
+      return "Request failed";
+    }
+  };
 
   const fetchHistory = async () => {
     try {
       const res = await fetch(`${API_BASE_URL}/interactions`);
+
+      if (!res.ok) {
+        throw new Error(await getApiError(res));
+      }
+
       const data = await res.json();
       const items = Array.isArray(data) ? data : [];
       setHistory(items);
@@ -112,25 +160,23 @@ function Interaction({ darkMode }) {
       }
     } catch (err) {
       console.error("Failed to fetch interactions:", err);
+      showNotice(err.message || "Failed to fetch interactions", "error");
     }
   };
 
   const fetchLeads = async () => {
     try {
       const res = await fetch(`${API_BASE_URL}/leads`);
+
+      if (!res.ok) {
+        throw new Error(await getApiError(res));
+      }
+
       const data = await res.json();
       setLeads(Array.isArray(data) ? data : []);
     } catch (err) {
       console.error("Failed to fetch leads:", err);
-    }
-  };
-
-  const getApiError = async (res) => {
-    try {
-      const data = await res.json();
-      return data?.detail || data?.error || data?.message || "Request failed";
-    } catch {
-      return "Request failed";
+      showNotice(err.message || "Failed to fetch leads", "error");
     }
   };
 
@@ -202,6 +248,76 @@ function Interaction({ darkMode }) {
     }
   }, [filteredHistory, selectedInteractionId]);
 
+  const handleVoiceInput = () => {
+    if (isListening) {
+      recognitionRef.current?.stop?.();
+      return;
+    }
+
+    const SpeechRecognition =
+      typeof window !== "undefined" &&
+      (window.SpeechRecognition || window.webkitSpeechRecognition);
+
+    if (!SpeechRecognition) {
+      showNotice(
+        "Voice input is not supported in this browser. Use Chrome or Edge for speech-to-text.",
+        "error"
+      );
+      return;
+    }
+
+    const recognition = new SpeechRecognition();
+    recognition.lang = "en-IN";
+    recognition.continuous = true;
+    recognition.interimResults = true;
+    recognition.maxAlternatives = 1;
+
+    voiceBaseNotesRef.current = notes.trim();
+
+    recognition.onstart = () => {
+      setIsListening(true);
+    };
+
+    recognition.onend = () => {
+      setIsListening(false);
+    };
+
+    recognition.onerror = (event) => {
+      setIsListening(false);
+      showNotice(`Voice input failed: ${event.error || "Unknown error"}`, "error");
+    };
+
+    recognition.onresult = (event) => {
+      let finalTranscript = "";
+      let interimTranscript = "";
+
+      for (let index = 0; index < event.results.length; index += 1) {
+        const transcript = event.results[index][0]?.transcript || "";
+
+        if (event.results[index].isFinal) {
+          finalTranscript += `${transcript} `;
+        } else {
+          interimTranscript += `${transcript} `;
+        }
+      }
+
+      const combinedText = [
+        voiceBaseNotesRef.current,
+        finalTranscript.trim(),
+        interimTranscript.trim(),
+      ]
+        .filter(Boolean)
+        .join(" ")
+        .replace(/\s+/g, " ")
+        .trim();
+
+      setNotes(combinedText);
+    };
+
+    recognitionRef.current = recognition;
+    recognition.start();
+  };
+
   const handleSubmit = async () => {
     if (!selectedLeadId) {
       setResult({
@@ -243,9 +359,12 @@ function Interaction({ darkMode }) {
 
       if (data?.saved !== false && !data?.error) {
         setNotes("");
+
         if (data?.interaction_id) {
           setSelectedInteractionId(data.interaction_id);
         }
+
+        showNotice("Interaction logged successfully");
       }
 
       fetchHistory();
@@ -255,23 +374,48 @@ function Interaction({ darkMode }) {
         message: "Interaction logging failed",
         error: err.message || "Unable to log interaction",
       });
+      showNotice(err.message || "Unable to log interaction", "error");
     } finally {
       setLoading(false);
     }
   };
 
-  const handleClearHistory = async () => {
+  const openDeleteInteraction = (item) => {
+    setDeleteTarget(item);
+  };
+
+  const closeDeleteInteraction = () => {
+    setDeleteTarget(null);
+  };
+
+  const handleDeleteInteraction = async () => {
+    if (!deleteTarget) return;
+
     try {
-      await fetch(`${API_BASE_URL}/clear-interactions`, {
+      const res = await fetch(`${API_BASE_URL}/interactions/${deleteTarget.id}`, {
         method: "DELETE",
       });
 
-      setHistory([]);
-      setSelectedInteractionId(null);
-      setResult(null);
-      setShowClearConfirm(false);
-    } catch (err) {
-      console.error("Failed to clear history:", err);
+      if (!res.ok) {
+        throw new Error(await getApiError(res));
+      }
+
+      const deletedId = deleteTarget.id;
+      const nextItem = filteredHistory.find(
+        (item) => String(item.id) !== String(deletedId)
+      );
+
+      setHistory((prev) => prev.filter((item) => item.id !== deletedId));
+
+      if (String(selectedInteractionId) === String(deletedId)) {
+        setSelectedInteractionId(nextItem?.id || null);
+      }
+
+      closeDeleteInteraction();
+      showNotice("Interaction deleted successfully");
+    } catch (error) {
+      console.error("Interaction delete failed:", error);
+      showNotice(error.message || "Unable to delete interaction", "error");
     }
   };
 
@@ -304,8 +448,10 @@ function Interaction({ darkMode }) {
       );
 
       setOpenStatusMenu(null);
+      showNotice("Follow-up status updated");
     } catch (error) {
       console.error("Follow-up status update failed:", error);
+      showNotice(error.message || "Follow-up status update failed", "error");
     }
   };
 
@@ -380,6 +526,21 @@ function Interaction({ darkMode }) {
         darkMode ? "bg-[#020617] text-white" : "bg-[#f5f7fb] text-slate-900"
       }`}
     >
+      <AnimatePresence>
+        {notice.message && (
+          <motion.div
+            initial={{ opacity: 0, y: 18, x: "-50%" }}
+            animate={{ opacity: 1, y: 0, x: "-50%" }}
+            exit={{ opacity: 0, y: 18, x: "-50%" }}
+            className={`fixed bottom-6 left-1/2 z-[90] px-5 py-4 rounded-2xl text-white shadow-2xl whitespace-pre-wrap ${
+              notice.type === "error" ? "bg-rose-600" : "bg-indigo-600"
+            }`}
+          >
+            {notice.message}
+          </motion.div>
+        )}
+      </AnimatePresence>
+
       <div className="max-w-[1700px] mx-auto px-10 py-10 space-y-8">
         <div>
           <p
@@ -391,7 +552,7 @@ function Interaction({ darkMode }) {
           </p>
 
           <h1 className="text-5xl font-black tracking-tight mb-4">
-            Interactions 
+            Interactions
           </h1>
 
           <p
@@ -435,7 +596,7 @@ function Interaction({ darkMode }) {
                 </div>
               </div>
 
-              <div className="flex flex-wrap gap-2">
+              <div className="flex items-center justify-end gap-2 shrink-0 whitespace-nowrap">
                 <InfoPill
                   darkMode={darkMode}
                   icon={<Link2 size={14} />}
@@ -580,7 +741,7 @@ function Interaction({ darkMode }) {
                                         darkMode ? "text-slate-400" : "text-slate-500"
                                       }`}
                                     >
-                                      {lead.email || "No email"} ·{" "}
+                                      {lead.email || "No email"} · {" "}
                                       {lead.phone || "No phone"}
                                     </p>
                                   </div>
@@ -621,7 +782,7 @@ function Interaction({ darkMode }) {
                           darkMode ? "text-slate-400" : "text-slate-500"
                         }`}
                       >
-                        {selectedLead.email || "No email"} ·{" "}
+                        {selectedLead.email || "No email"} · {" "}
                         {selectedLead.phone || "No phone"}
                       </p>
                     </div>
@@ -648,13 +809,36 @@ function Interaction({ darkMode }) {
                   >
                     Interaction Notes
                   </label>
-                  <span
-                    className={`text-xs ${
-                      darkMode ? "text-slate-500" : "text-slate-400"
-                    }`}
-                  >
-                    {noteWordCount} words
-                  </span>
+
+                  <div className="flex items-center gap-3">
+                    <button
+                      type="button"
+                      onClick={handleVoiceInput}
+                      title={
+                        speechRecognitionSupported
+                          ? "Speak interaction note"
+                          : "Voice input not supported in this browser"
+                      }
+                      className={`h-9 px-3 rounded-full border flex items-center gap-2 text-xs font-semibold transition-all ${
+                        isListening
+                          ? "bg-rose-500 text-white border-rose-500"
+                          : darkMode
+                          ? "bg-[#020617] border-white/10 text-slate-300 hover:border-indigo-500/40"
+                          : "bg-slate-50 border-slate-200 text-slate-700 hover:border-indigo-300"
+                      }`}
+                    >
+                      {isListening ? <MicOff size={14} /> : <Mic size={14} />}
+                      {isListening ? "Stop" : "Voice"}
+                    </button>
+
+                    <span
+                      className={`text-xs ${
+                        darkMode ? "text-slate-500" : "text-slate-400"
+                      }`}
+                    >
+                      {noteWordCount} words
+                    </span>
+                  </div>
                 </div>
 
                 <textarea
@@ -869,7 +1053,7 @@ function Interaction({ darkMode }) {
                   darkMode ? "text-slate-400" : "text-slate-500"
                 }`}
               >
-                Select an interaction from the list to inspect full notes, AI output, tags, and follow-up status.
+                Select an interaction from the list to inspect full notes, AI output, tags, follow-up status, or delete one record safely.
               </p>
               <p
                 className={`text-xs mt-2 ${
@@ -880,15 +1064,6 @@ function Interaction({ darkMode }) {
               </p>
             </div>
 
-            <motion.button
-              whileHover={{ scale: 1.01 }}
-              whileTap={{ scale: 0.98 }}
-              onClick={() => setShowClearConfirm(true)}
-              className="h-[50px] px-5 rounded-2xl bg-red-500/10 text-red-400 flex items-center gap-3"
-            >
-              <Trash2 size={18} />
-              Clear History
-            </motion.button>
           </div>
 
           {filteredHistory.length === 0 ? (
@@ -959,7 +1134,7 @@ function Interaction({ darkMode }) {
                                 darkMode ? "text-slate-500" : "text-slate-400"
                               }`}
                             >
-                              Lead ID: {item.lead_id || "Unlinked"} ·{" "}
+                              Lead ID: {item.lead_id || "Unlinked"} · {" "}
                               {item.lead_name || "No linked lead"}
                             </p>
                           </div>
@@ -1012,6 +1187,7 @@ function Interaction({ darkMode }) {
                     openStatusMenu={openStatusMenu}
                     setOpenStatusMenu={setOpenStatusMenu}
                     updateFollowUpStatus={updateFollowUpStatus}
+                    onDelete={openDeleteInteraction}
                   />
                 ) : (
                   <div className="h-full min-h-[420px] flex items-center justify-center text-center">
@@ -1036,7 +1212,7 @@ function Interaction({ darkMode }) {
         </div>
 
         <AnimatePresence>
-          {showClearConfirm && (
+          {deleteTarget && (
             <motion.div
               initial={{ opacity: 0 }}
               animate={{ opacity: 1 }}
@@ -1058,7 +1234,7 @@ function Interaction({ darkMode }) {
                 </div>
 
                 <h2 className="text-3xl font-bold mb-3">
-                  Clear All Interactions?
+                  Delete Interaction?
                 </h2>
 
                 <p
@@ -1066,23 +1242,24 @@ function Interaction({ darkMode }) {
                     darkMode ? "text-slate-400" : "text-slate-600"
                   }`}
                 >
-                  This will delete all logged interactions from your current CRM
-                  history. This action cannot be undone.
+                  This will delete only <b>Interaction #{deleteTarget.id}</b>.
+                  The linked lead record will remain unchanged. This action cannot
+                  be undone.
                 </p>
 
                 <div className="flex justify-end gap-3 mt-8">
                   <button
-                    onClick={() => setShowClearConfirm(false)}
-                    className="h-12 px-5 rounded-2xl bg-slate-500/10"
+                    onClick={closeDeleteInteraction}
+                    className="h-12 px-5 rounded-2xl bg-slate-500/10 transition-all hover:bg-slate-500/20"
                   >
                     Cancel
                   </button>
 
                   <button
-                    onClick={handleClearHistory}
-                    className="h-12 px-5 rounded-2xl bg-red-600 text-white"
+                    onClick={handleDeleteInteraction}
+                    className="h-12 px-5 rounded-2xl bg-red-600 text-white transition-all hover:bg-red-700"
                   >
-                    Clear
+                    Delete
                   </button>
                 </div>
               </motion.div>
@@ -1104,6 +1281,7 @@ function InteractionDetail({
   openStatusMenu,
   setOpenStatusMenu,
   updateFollowUpStatus,
+  onDelete,
 }) {
   return (
     <div className="h-full flex flex-col min-h-0">
@@ -1112,8 +1290,8 @@ function InteractionDetail({
           darkMode ? "border-white/10" : "border-slate-200"
         }`}
       >
-        <div className="flex flex-col xl:flex-row xl:items-start xl:justify-between gap-4 mb-5">
-          <div>
+        <div className="grid grid-cols-1 xl:grid-cols-[1fr_auto] gap-5 mb-5 items-start">
+          <div className="min-w-0">
             <p
               className={`uppercase tracking-[0.25em] text-xs mb-2 ${
                 darkMode ? "text-slate-500" : "text-slate-400"
@@ -1127,12 +1305,12 @@ function InteractionDetail({
                 darkMode ? "text-slate-500" : "text-slate-400"
               }`}
             >
-              Lead ID: {item.lead_id || "Unlinked"} ·{" "}
+              Lead ID: {item.lead_id || "Unlinked"} · {" "}
               {item.lead_name || "No linked lead"}
             </p>
           </div>
 
-          <div className="flex flex-wrap gap-2">
+          <div className="flex items-start justify-start xl:justify-end gap-2 shrink-0 whitespace-nowrap">
             <span
               className={`px-4 py-2 rounded-full border text-sm font-medium capitalize ${getSentimentClass(
                 item.sentiment
@@ -1188,6 +1366,20 @@ function InteractionDetail({
                 )}
               </AnimatePresence>
             </div>
+
+            <button
+              type="button"
+              onClick={() => onDelete(item)}
+              title="Delete interaction"
+              aria-label="Delete interaction"
+              className={`h-10 w-10 rounded-full border flex items-center justify-center transition-all hover:scale-105 active:scale-95 ${
+                darkMode
+                  ? "bg-rose-500/10 text-rose-300 border-rose-500/20 hover:bg-rose-500/15"
+                  : "bg-rose-50 text-rose-700 border-rose-100 hover:bg-rose-100"
+              }`}
+            >
+              <Trash2 size={16} />
+            </button>
           </div>
         </div>
 
@@ -1240,7 +1432,7 @@ function InteractionDetail({
 function InfoPill({ icon, label, darkMode }) {
   return (
     <span
-      className={`inline-flex items-center gap-2 px-3 py-1.5 rounded-full border text-xs font-semibold ${
+      className={`inline-flex shrink-0 items-center gap-2 px-3 py-1.5 rounded-full border text-xs font-semibold ${
         darkMode
           ? "bg-indigo-500/10 text-indigo-300 border-indigo-500/20"
           : "bg-indigo-50 text-indigo-700 border-indigo-100"
